@@ -172,3 +172,48 @@ musy/
   cd android && ./gradlew assembleDebug
   ```
   The output APK will be located under `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+---
+
+## 🐳 Building & Running with Docker
+
+You can build both the Android APK and the Linux binary inside a self-contained Docker builder container. This eliminates the need to install JDK 17, Android SDK, Rust/Cargo, or WebKitGTK development packages on your host machine.
+
+### 1. Build the Docker Image
+```bash
+docker build -t musy-builder .
+```
+
+### 2. Compile Both Applications
+Mount the workspace into the container to generate the final binaries in the `build-outputs/` folder:
+```bash
+docker run --rm -v $(pwd):/workspace musy-builder
+```
+This produces:
+- Android APK: `build-outputs/musy-android.apk`
+- Linux Executable: `build-outputs/musy-linux`
+
+### 3. Run and Test the Linux Application via Docker
+Because the compiled Linux binary requires WebKitGTK and GTK system libraries, you can run it directly through the Docker container by forwarding your host's X11 server socket and audio cards:
+
+```bash
+# Allow local container connections to the X11 server display
+xhost +local:docker
+
+# Run the Linux binary inside the container with GUI and Sound forwarding
+docker run -it --rm \
+  --net=host \
+  --ipc=host \
+  -e DISPLAY=$DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+  -v $HOME/.Xauthority:/root/.Xauthority:ro \
+  --device /dev/snd \
+  -v $HOME/Music:/root/Music \
+  -v $(pwd):/workspace \
+  --entrypoint /workspace/build-outputs/musy-linux \
+  musy-builder
+
+# Revoke display permission after exiting the player
+xhost -local:docker
+```
+
