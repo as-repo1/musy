@@ -1,0 +1,19 @@
+{
+  "name": "musy-workspace",
+  "version": "1.0.0",
+  "description": "Cross-platform local music player (Linux & Android)",
+  "private": true,
+  "scripts": {
+    "build:frontend": "npm run build --prefix frontend",
+    "copy:android": "mkdir -p android/app/src/main/assets/www && cp -r frontend/dist/* android/app/src/main/assets/www/",
+    "build:android": "npm run build:frontend && npm run copy:android && cd android && ./gradlew assembleDebug",
+    "build:desktop": "npm run build:frontend && npx tauri build",
+    "build:all": "npm run build:desktop && npm run build:android",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev:desktop": "npx tauri dev",
+    "install:all": "npm install && npm install --prefix frontend && npm install --prefix src-tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/cli": "^2.11.2"
+  }
+}

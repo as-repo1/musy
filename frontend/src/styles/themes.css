@@ -1,0 +1,120 @@
+/* Musy Themes System */
+
+/* Gruvbox Dark Theme */
+[data-theme="gruvbox-dark"] {
+  --bg: #282828;
+  --bg-panel: #1d2021;
+  --bg-hover: #3c3836;
+  --text: #ebdbb2;
+  --text-muted: #a89984;
+  --accent: #fabd2f;
+  --accent-hover: #fe8019;
+  --border: rgba(235, 219, 178, 0.1);
+  --glass-bg: rgba(29, 32, 33, 0.55);
+  --glass-border: rgba(235, 219, 178, 0.08);
+  --shadow: rgba(0, 0, 0, 0.3) 0 8px 30px;
+  --visualizer-bar: #fabd2f;
+  --card-bg: rgba(60, 56, 54, 0.4);
+}
+
+/* Gruvbox Light Theme */
+[data-theme="gruvbox-light"] {
+  --bg: #fbf1c7;
+  --bg-panel: #f9f5d7;
+  --bg-hover: #ebdbb2;
+  --text: #282828;
+  --text-muted: #7c6f64;
+  --accent: #af3a03;
+  --accent-hover: #b57614;
+  --border: rgba(40, 40, 40, 0.1);
+  --glass-bg: rgba(249, 245, 215, 0.6);
+  --glass-border: rgba(40, 40, 40, 0.08);
+  --shadow: rgba(40, 40, 40, 0.1) 0 8px 30px;
+  --visualizer-bar: #af3a03;
+  --card-bg: rgba(235, 219, 178, 0.4);
+}
+
+/* Nord Theme */
+[data-theme="nord"] {
+  --bg: #2e3440;
+  --bg-panel: #242933;
+  --bg-hover: #3b4252;
+  --text: #eceff4;
+  --text-muted: #d8dee9;
+  --accent: #88c0d0;
+  --accent-hover: #8fbcbb;
+  --border: rgba(236, 239, 244, 0.08);
+  --glass-bg: rgba(36, 41, 51, 0.6);
+  --glass-border: rgba(236, 239, 244, 0.05);
+  --shadow: rgba(0, 0, 0, 0.25) 0 8px 30px;
+  --visualizer-bar: #88c0d0;
+  --card-bg: rgba(59, 66, 82, 0.4);
+}
+
+/* Tokyo Night Theme */
+[data-theme="tokyo-night"] {
+  --bg: #1a1b26;
+  --bg-panel: #16161e;
+  --bg-hover: #24283b;
+  --text: #c0caf5;
+  --text-muted: #787c99;
+  --accent: #7aa2f7;
+  --accent-hover: #bb9af7;
+  --border: rgba(122, 162, 247, 0.12);
+  --glass-bg: rgba(22, 22, 30, 0.6);
+  --glass-border: rgba(122, 162, 247, 0.08);
+  --shadow: rgba(0, 0, 0, 0.35) 0 8px 30px;
+  --visualizer-bar: #7aa2f7;
+  --card-bg: rgba(36, 40, 59, 0.4);
+}
+
+/* Dracula Theme */
+[data-theme="dracula"] {
+  --bg: #282a36;
+  --bg-panel: #1e1f29;
+  --bg-hover: #44475a;
+  --text: #f8f8f2;
+  --text-muted: #6272a4;
+  --accent: #bd93f9;
+  --accent-hover: #ff79c6;
+  --border: rgba(189, 147, 249, 0.12);
+  --glass-bg: rgba(30, 31, 41, 0.6);
+  --glass-border: rgba(189, 147, 249, 0.08);
+  --shadow: rgba(0, 0, 0, 0.4) 0 8px 30px;
+  --visualizer-bar: #bd93f9;
+  --card-bg: rgba(68, 71, 90, 0.4);
+}
+
+/* Material M3 Dark Theme (Default Android dynamic theme base) */
+[data-theme="material-dark"] {
+  --bg: #141218;
+  --bg-panel: #1d1b20;
+  --bg-hover: #2b2930;
+  --text: #e6e1e5;
+  --text-muted: #cac4d0;
+  --accent: #d0bcff;
+  --accent-hover: #ccc2dc;
+  --border: rgba(208, 188, 255, 0.15);
+  --glass-bg: rgba(29, 27, 32, 0.6);
+  --glass-border: rgba(208, 188, 255, 0.08);
+  --shadow: rgba(0, 0, 0, 0.3) 0 8px 30px;
+  --visualizer-bar: #d0bcff;
+  --card-bg: rgba(43, 41, 48, 0.4);
+}
+
+/* Material M3 Light Theme */
+[data-theme="material-light"] {
+  --bg: #fdf7ff;
+  --bg-panel: #f3edf7;
+  --bg-hover: #e8def8;
+  --text: #1d1b20;
+  --text-muted: #49454f;
+  --accent: #6750a4;
+  --accent-hover: #625b71;
+  --border: rgba(103, 80, 164, 0.15);
+  --glass-bg: rgba(243, 237, 247, 0.65);
+  --glass-border: rgba(103, 80, 164, 0.08);
+  --shadow: rgba(0, 0, 0, 0.1) 0 8px 30px;
+  --visualizer-bar: #6750a4;
+  --card-bg: rgba(232, 222, 248, 0.4);
+}
