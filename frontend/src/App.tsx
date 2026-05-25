@@ -1,13 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Play, Pause, SkipForward, SkipBack, Shuffle, Repeat, 
-  Volume2, VolumeX, Palette, ChevronDown, Music 
+  Volume2, VolumeX, Music, BookOpen, User, Layers
 } from 'lucide-react';
 import { bridge } from './bridge/MusicBridge';
 import type { Track, PlaybackState } from './bridge/MusicBridge';
 import { TrackList } from './components/TrackList';
 import { ThemeSelector } from './components/ThemeSelector';
 import { Visualizer } from './components/Visualizer';
+
+interface LyricLine {
+  time: number;
+  text: string;
+}
 
 export default function App() {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -17,54 +22,58 @@ export default function App() {
     duration: 0,
     currentTrack: null,
   });
+  
+  // Metro Pivot active state
+  // Pivots: 'now-playing' | 'collection' | 'folders' | 'settings'
+  const [activePivot, setActivePivot] = useState<'collection' | 'now-playing' | 'settings'>('collection');
+  
+  // Collection tab: 'songs' | 'artists' | 'albums' | 'queue'
+  const [activeTab, setActiveTab] = useState<'songs' | 'artists' | 'albums' | 'queue'>('songs');
+
   const [volume, setVolume] = useState(0.8);
   const [isMuted, setIsMuted] = useState(false);
-  const [theme, setTheme] = useState('nord');
-  const [showThemeSelector, setShowThemeSelector] = useState(false);
+  const [theme, setTheme] = useState('gruvbox-dark');
   const [isLoading, setIsLoading] = useState(false);
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<'none' | 'one' | 'all'>('all');
   
-  // Library selection state (Android only)
+  // Library folder picker details (Android only)
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
 
-  // Mobile UI States
-  const [isMobileNowPlayingOpen, setIsMobileNowPlayingOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
+  // Active play queue
+  const [playQueue, setPlayQueue] = useState<Track[]>([]);
+  
+  // LRC Lyrics state
+  const [lyrics, setLyrics] = useState<LyricLine[]>([]);
+  const [currentLyricIndex, setCurrentLyricIndex] = useState(-1);
+  const lyricsContainerRef = useRef<HTMLDivElement>(null);
 
-  // Handle Resize
-  useEffect(() => {
-    const handleResize = () => {
-      setIsMobile(window.innerWidth <= 768);
-    };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  // Search/Filters
+  const [selectedArtist, setSelectedArtist] = useState<string | null>(null);
+  const [selectedAlbum, setSelectedAlbum] = useState<string | null>(null);
 
-  // Initialize and Subscribe
+  // Stable state reference to prevent closures in events & callbacks
+  const stateRef = useRef({ tracks, shuffle, repeat, currentTrack: playbackState.currentTrack, playQueue });
   useEffect(() => {
-    // 1. Load Theme from LocalStorage or default
-    const savedTheme = localStorage.getItem('musy-theme') || 'nord';
+    stateRef.current = { tracks, shuffle, repeat, currentTrack: playbackState.currentTrack, playQueue };
+  }, [tracks, shuffle, repeat, playbackState.currentTrack, playQueue]);
+
+  // Decoupled lifecycle effects:
+  // 1. Mount-only listener subscription
+  useEffect(() => {
+    // Load local stored theme
+    const savedTheme = localStorage.getItem('musy-theme') || 'gruvbox-dark';
     applyTheme(savedTheme);
 
-    // 2. Subscribe to bridge changes (Android/Tauri/Web state)
+    // Subscribe to native playback callbacks
     const unsubscribe = bridge.subscribe((state) => {
       setPlaybackState(state);
     });
 
-    // 3. Scan library initially
+    // Run initial scan
     scanLibrary();
 
-    // 4. Listen for track ended event to handle auto-advance
-    const handleTrackEnded = () => {
-      handleNextTrack(true); // advance naturally
-    };
-    window.addEventListener('musy-track-ended', handleTrackEnded);
-
-    // 5. Check if Android interface has dynamic wallpaper colors to inject
-    applyAndroidDynamicColors();
-
-    // 6. Hook folder selected callback (Android)
+    // Hook native callback events
     (window as any).onFolderSelected = (folderName: string) => {
       setSelectedFolder(folderName);
     };
@@ -72,18 +81,118 @@ export default function App() {
       scanLibrary();
     };
 
+    // Auto-colors on Android
+    applyAndroidDynamicColors();
+
+    // Listen for track-ended event and advance playback
+    const handleTrackEnded = () => {
+      handleNextTrack(true);
+    };
+    window.addEventListener('musy-track-ended', handleTrackEnded);
+
     return () => {
       unsubscribe();
       window.removeEventListener('musy-track-ended', handleTrackEnded);
       delete (window as any).onFolderSelected;
       delete (window as any).scanLibrary;
     };
-  }, [tracks, repeat, shuffle, playbackState.currentTrack]);
+  }, []);
+
+  // 2. Fetch lyrics and parse LRC file on song change
+  useEffect(() => {
+    const currentTrack = playbackState.currentTrack;
+    if (currentTrack) {
+      try {
+        const rawLrc = bridge.getLyrics(currentTrack.path);
+        if (rawLrc) {
+          setLyrics(parseLRC(rawLrc));
+        } else {
+          setLyrics([]);
+        }
+      } catch (e) {
+        setLyrics([]);
+      }
+    } else {
+      setLyrics([]);
+    }
+    setCurrentLyricIndex(-1);
+  }, [playbackState.currentTrack]);
+
+  // 3. Track active lyrics highlighting & auto-scroll
+  useEffect(() => {
+    if (lyrics.length === 0) return;
+    const currentPos = playbackState.position;
+    
+    // Find matching lyric line
+    let index = -1;
+    for (let i = 0; i < lyrics.length; i++) {
+      if (currentPos >= lyrics[i].time) {
+        index = i;
+      } else {
+        break;
+      }
+    }
+
+    if (index !== currentLyricIndex) {
+      setCurrentLyricIndex(index);
+      
+      // Auto scroll active lyric line into center of viewport
+      if (lyricsContainerRef.current && index !== -1) {
+        const container = lyricsContainerRef.current;
+        const activeLineElement = container.children[index] as HTMLElement;
+        if (activeLineElement) {
+          const containerHeight = container.clientHeight;
+          const lineOffsetTop = activeLineElement.offsetTop;
+          const lineHeight = activeLineElement.clientHeight;
+          container.scrollTo({
+            top: lineOffsetTop - containerHeight / 2 + lineHeight / 2,
+            behavior: 'smooth'
+          });
+        }
+      }
+    }
+  }, [playbackState.position, lyrics, currentLyricIndex]);
+
+  // LRC lyric parser
+  const parseLRC = (lrcText: string): LyricLine[] => {
+    const lines = lrcText.split('\n');
+    const result: LyricLine[] = [];
+    const timeRegex = /\[(\d+):(\d+)(?:\.(\d+))?\]/g;
+
+    for (const line of lines) {
+      const text = line.replace(/\[\d+:\d+(?:\.\d+)?\]/g, '').trim();
+      if (!text) continue;
+
+      timeRegex.lastIndex = 0;
+      let match;
+      while ((match = timeRegex.exec(line)) !== null) {
+        const minutes = parseInt(match[1], 10);
+        const seconds = parseInt(match[2], 10);
+        const milliseconds = match[3] ? parseInt(match[3], 10) * (match[3].length === 2 ? 10 : 1) : 0;
+        const timeInSeconds = minutes * 60 + seconds + milliseconds / 1000;
+        result.push({ time: timeInSeconds, text });
+      }
+    }
+    return result.sort((a, b) => a.time - b.time);
+  };
 
   const applyTheme = (newTheme: string) => {
     setTheme(newTheme);
     localStorage.setItem('musy-theme', newTheme);
     document.documentElement.setAttribute('data-theme', newTheme);
+    
+    // Fallback overrides if switching back to preset themes
+    if (newTheme !== 'material-dark' && newTheme !== 'material-light') {
+      const root = document.documentElement;
+      root.style.removeProperty('--accent');
+      root.style.removeProperty('--accent-hover');
+      root.style.removeProperty('--bg');
+      root.style.removeProperty('--bg-panel');
+      root.style.removeProperty('--text');
+      root.style.removeProperty('--border');
+    } else {
+      applyAndroidDynamicColors();
+    }
   };
 
   const applyAndroidDynamicColors = () => {
@@ -92,48 +201,36 @@ export default function App() {
       try {
         const colors = JSON.parse(jsonColors);
         const root = document.documentElement;
-        if (colors.primary) {
-          root.style.setProperty('--accent', colors.primary);
-          root.style.setProperty('--visualizer-bar', colors.primary);
-        }
-        if (colors.primaryContainer) {
-          root.style.setProperty('--accent-hover', colors.primaryContainer);
-        }
-        if (colors.background) {
-          root.style.setProperty('--bg', colors.background);
-        }
-        if (colors.surface) {
-          root.style.setProperty('--bg-panel', colors.surface);
-        }
-        if (colors.onSurface) {
-          root.style.setProperty('--text', colors.onSurface);
-        }
-        if (colors.outline) {
-          root.style.setProperty('--border', colors.outline);
-        }
+        if (colors.primary) root.style.setProperty('--accent', colors.primary);
+        if (colors.primaryContainer) root.style.setProperty('--accent-hover', colors.primaryContainer);
+        if (colors.background) root.style.setProperty('--bg', colors.background);
+        if (colors.surface) root.style.setProperty('--bg-panel', colors.surface);
+        if (colors.onSurface) root.style.setProperty('--text', colors.onSurface);
+        if (colors.outline) root.style.setProperty('--border', colors.outline);
       } catch (e) {
-        console.error('Failed to parse injected Android wallpaper colors:', e);
+        console.error('Failed parsing wallpaper colors:', e);
       }
     }
   };
 
-  // Scan music
   const scanLibrary = async () => {
     setIsLoading(true);
     try {
       const items = await bridge.scanTracks();
       setTracks(items);
+      setPlayQueue(items); // initialize active queue with scanned tracks
     } catch (e) {
-      console.error('Error scanning library:', e);
+      console.error('Library scan error:', e);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Playback Control Methods
+  // Playback Operations
   const handlePlayPause = () => {
-    if (!playbackState.currentTrack && tracks.length > 0) {
-      handleTrackSelect(tracks[0]);
+    const { playQueue: currentQueue } = stateRef.current;
+    if (!playbackState.currentTrack && currentQueue.length > 0) {
+      handleTrackSelect(currentQueue[0]);
     } else if (playbackState.playing) {
       bridge.pause();
     } else {
@@ -142,29 +239,28 @@ export default function App() {
   };
 
   const handleTrackSelect = (track: Track) => {
+    // Add to queue if not present, but usually we just set it as active
     bridge.play(track);
-    if (isMobile) {
-      setIsMobileNowPlayingOpen(true);
-    }
   };
 
   const handleNextTrack = (naturalEnd = false) => {
-    if (tracks.length === 0) return;
+    const { playQueue: currentQueue, shuffle: currentShuffle, repeat: currentRepeat, currentTrack } = stateRef.current;
+    if (currentQueue.length === 0) return;
 
-    if (naturalEnd && repeat === 'one' && playbackState.currentTrack) {
-      bridge.play(playbackState.currentTrack);
+    if (naturalEnd && currentRepeat === 'one' && currentTrack) {
+      bridge.play(currentTrack);
       return;
     }
 
     let nextIndex = 0;
-    if (shuffle) {
-      nextIndex = Math.floor(Math.random() * tracks.length);
-    } else if (playbackState.currentTrack) {
-      const currentIndex = tracks.findIndex(t => t.id === playbackState.currentTrack?.id);
+    if (currentShuffle) {
+      nextIndex = Math.floor(Math.random() * currentQueue.length);
+    } else if (currentTrack) {
+      const currentIndex = currentQueue.findIndex(t => t.id === currentTrack.id);
       nextIndex = currentIndex + 1;
-      if (nextIndex >= tracks.length) {
-        nextIndex = repeat === 'all' ? 0 : tracks.length - 1;
-        if (repeat === 'none' && naturalEnd) {
+      if (nextIndex >= currentQueue.length) {
+        nextIndex = currentRepeat === 'all' ? 0 : currentQueue.length - 1;
+        if (currentRepeat === 'none' && naturalEnd) {
           bridge.pause();
           bridge.seek(0);
           return;
@@ -172,11 +268,15 @@ export default function App() {
       }
     }
 
-    handleTrackSelect(tracks[nextIndex]);
+    const nextTrack = currentQueue[nextIndex];
+    if (nextTrack) {
+      handleTrackSelect(nextTrack);
+    }
   };
 
   const handlePrevTrack = () => {
-    if (tracks.length === 0) return;
+    const { playQueue: currentQueue, shuffle: currentShuffle, repeat: currentRepeat, currentTrack } = stateRef.current;
+    if (currentQueue.length === 0) return;
 
     if (playbackState.position > 3) {
       bridge.seek(0);
@@ -184,17 +284,20 @@ export default function App() {
     }
 
     let prevIndex = 0;
-    if (shuffle) {
-      prevIndex = Math.floor(Math.random() * tracks.length);
-    } else if (playbackState.currentTrack) {
-      const currentIndex = tracks.findIndex(t => t.id === playbackState.currentTrack?.id);
+    if (currentShuffle) {
+      prevIndex = Math.floor(Math.random() * currentQueue.length);
+    } else if (currentTrack) {
+      const currentIndex = currentQueue.findIndex(t => t.id === currentTrack.id);
       prevIndex = currentIndex - 1;
       if (prevIndex < 0) {
-        prevIndex = repeat === 'all' ? tracks.length - 1 : 0;
+        prevIndex = currentRepeat === 'all' ? currentQueue.length - 1 : 0;
       }
     }
 
-    handleTrackSelect(tracks[prevIndex]);
+    const prevTrack = currentQueue[prevIndex];
+    if (prevTrack) {
+      handleTrackSelect(prevTrack);
+    }
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -206,9 +309,7 @@ export default function App() {
     const val = parseFloat(e.target.value);
     setVolume(val);
     bridge.setVolume(val);
-    if (isMuted && val > 0) {
-      setIsMuted(false);
-    }
+    if (isMuted && val > 0) setIsMuted(false);
   };
 
   const toggleMute = () => {
@@ -221,6 +322,16 @@ export default function App() {
     }
   };
 
+  const handleSelectFolder = () => {
+    if (bridge.getPlatform() === 'android') {
+      try {
+        (window as any).AndroidInterface.selectFolder();
+      } catch (e) {
+        console.error('Launch folder picker error:', e);
+      }
+    }
+  };
+
   const formatTime = (seconds: number) => {
     if (isNaN(seconds) || seconds <= 0) return '0:00';
     const mins = Math.floor(seconds / 60);
@@ -228,491 +339,737 @@ export default function App() {
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
-  const handleSelectFolder = () => {
-    if (bridge.getPlatform() === 'android') {
-      try {
-        (window as any).AndroidInterface.selectFolder();
-      } catch (e) {
-        console.error('Failed to launch folder picker on Android:', e);
-      }
-    }
-  };
+  // Calculated categories from flat track list
+  const artistsList = useMemo(() => {
+    const map = new Map<string, Track[]>();
+    tracks.forEach(t => {
+      const artist = t.artist || 'Unknown Artist';
+      if (!map.has(artist)) map.set(artist, []);
+      map.get(artist)!.push(t);
+    });
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [tracks]);
 
-  const currentCover = playbackState.currentTrack?.cover;
+  const albumsList = useMemo(() => {
+    const map = new Map<string, Track[]>();
+    tracks.forEach(t => {
+      const album = t.album || 'Unknown Album';
+      if (!map.has(album)) map.set(album, []);
+      map.get(album)!.push(t);
+    });
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [tracks]);
+
+  // Display fields for currently playing track
   const currentTitle = playbackState.currentTrack?.title || 'Not Playing';
-  const currentArtist = playbackState.currentTrack?.artist || 'Select a song from local library';
+  const currentArtist = playbackState.currentTrack?.artist || 'Tap collection to choose a song';
+  const currentCover = playbackState.currentTrack?.cover;
 
   return (
-    <div className="glass-panel main-window" style={styles.mainWindow}>
+    <div className="metro-hub safe-padding-top safe-padding-bottom" style={styles.hubContainer}>
       
-      {/* Sidebar - Track list */}
-      <div style={isMobile ? styles.mobileListWrapper : styles.sidebar}>
-        <div style={styles.sidebarHeader}>
-          <div style={styles.appName}>
-            <Music size={24} style={{ color: 'var(--accent)', marginRight: '10px' }} />
-            <h1 style={styles.logoText}>Musy</h1>
-          </div>
-          <button 
-            onClick={() => setShowThemeSelector(!showThemeSelector)}
-            style={styles.actionIconButton}
+      {/* 1. TOP METRO HEADER SECTION */}
+      <div style={styles.hubHeader}>
+        <span style={styles.appTitle}>MUSY PLAYER //</span>
+        <div style={styles.pivotMenu}>
+          <h2 
+            onClick={() => setActivePivot('collection')}
+            style={{
+              ...styles.pivotItem,
+              color: activePivot === 'collection' ? 'var(--accent)' : 'var(--text-muted)',
+              opacity: activePivot === 'collection' ? 1 : 0.6
+            }}
           >
-            <Palette size={20} />
-          </button>
-        </div>
-
-        <div style={styles.trackListContainer}>
-          <TrackList 
-            tracks={tracks}
-            currentTrack={playbackState.currentTrack}
-            isPlaying={playbackState.playing}
-            onTrackSelect={handleTrackSelect}
-            onRefresh={scanLibrary}
-            isLoading={isLoading}
-            selectedFolder={selectedFolder}
-            onSelectFolder={handleSelectFolder}
-            isAndroid={bridge.getPlatform() === 'android'}
-          />
+            collection
+          </h2>
+          <h2 
+            onClick={() => setActivePivot('now-playing')}
+            style={{
+              ...styles.pivotItem,
+              color: activePivot === 'now-playing' ? 'var(--accent)' : 'var(--text-muted)',
+              opacity: activePivot === 'now-playing' ? 1 : 0.6
+            }}
+          >
+            now playing
+          </h2>
+          <h2 
+            onClick={() => setActivePivot('settings')}
+            style={{
+              ...styles.pivotItem,
+              color: activePivot === 'settings' ? 'var(--accent)' : 'var(--text-muted)',
+              opacity: activePivot === 'settings' ? 1 : 0.6
+            }}
+          >
+            settings
+          </h2>
         </div>
       </div>
 
-      {/* Main Panel - Audio Player controls (Desktop View) */}
-      {!isMobile && (
-        <div style={styles.playerContainer}>
-          {showThemeSelector && (
-            <div style={styles.themeSelectorPopup}>
-              <ThemeSelector 
-                currentTheme={theme} 
-                onChangeTheme={applyTheme} 
-                onClose={() => setShowThemeSelector(false)}
-              />
-            </div>
-          )}
+      {/* 2. SLIDING VIEWPORT PORTAL */}
+      <div style={styles.viewport}>
 
-          {/* Album Art Section */}
-          <div style={styles.artSection}>
-            <div style={styles.artCardShadow}>
-              {currentCover ? (
-                <img src={currentCover} alt="Cover" style={styles.largeCoverArt} />
-              ) : (
-                <div style={styles.largeFallbackCoverArt}>
-                  <Music size={80} style={{ color: 'var(--text-muted)', opacity: 0.3 }} />
+        {/* --- PIVOT 1: COLLECTION --- */}
+        {activePivot === 'collection' && (
+          <div className="metro-page-active" style={styles.pageContainer}>
+            {/* Metro Tab Selector Sub-header */}
+            <div style={styles.tabBar}>
+              <button 
+                onClick={() => { setActiveTab('songs'); setSelectedArtist(null); setSelectedAlbum(null); }}
+                style={{ ...styles.tabItem, color: activeTab === 'songs' ? 'var(--accent)' : 'var(--text-muted)' }}
+              >
+                songs
+              </button>
+              <button 
+                onClick={() => { setActiveTab('artists'); setSelectedArtist(null); }}
+                style={{ ...styles.tabItem, color: activeTab === 'artists' ? 'var(--accent)' : 'var(--text-muted)' }}
+              >
+                artists
+              </button>
+              <button 
+                onClick={() => { setActiveTab('albums'); setSelectedAlbum(null); }}
+                style={{ ...styles.tabItem, color: activeTab === 'albums' ? 'var(--accent)' : 'var(--text-muted)' }}
+              >
+                albums
+              </button>
+              <button 
+                onClick={() => setActiveTab('queue')}
+                style={{ ...styles.tabItem, color: activeTab === 'queue' ? 'var(--accent)' : 'var(--text-muted)' }}
+              >
+                queue ({playQueue.length})
+              </button>
+            </div>
+
+            <div style={styles.tabContent}>
+              {/* SONGS SUB-TAB */}
+              {activeTab === 'songs' && (
+                <TrackList 
+                  tracks={tracks}
+                  currentTrack={playbackState.currentTrack}
+                  isPlaying={playbackState.playing}
+                  onTrackSelect={handleTrackSelect}
+                  onRefresh={scanLibrary}
+                  isLoading={isLoading}
+                  selectedFolder={selectedFolder}
+                  onSelectFolder={handleSelectFolder}
+                  isAndroid={bridge.getPlatform() === 'android'}
+                />
+              )}
+
+              {/* ARTISTS SUB-TAB */}
+              {activeTab === 'artists' && (
+                <div style={styles.categorizedListContainer} className="no-scrollbar">
+                  {!selectedArtist ? (
+                    artistsList.map(([artistName, artistTracks]) => (
+                      <div 
+                        key={artistName}
+                        onClick={() => setSelectedArtist(artistName)}
+                        style={styles.metroRowTile}
+                        className="metro-tile-tilt"
+                      >
+                        <User size={20} style={{ color: 'var(--accent)', marginRight: '16px' }} />
+                        <div style={styles.tileInfo}>
+                          <span style={styles.tileTitle}>{artistName}</span>
+                          <span style={styles.tileSubtitle}>{artistTracks.length} tracks</span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div>
+                      <div style={styles.subListHeader}>
+                        <button onClick={() => setSelectedArtist(null)} style={styles.backButton}>&larr; BACK TO ARTISTS</button>
+                        <h3 style={styles.subCategoryTitle}>{selectedArtist}</h3>
+                      </div>
+                      <TrackList 
+                        tracks={artistsList.find(a => a[0] === selectedArtist)?.[1] || []}
+                        currentTrack={playbackState.currentTrack}
+                        isPlaying={playbackState.playing}
+                        onTrackSelect={handleTrackSelect}
+                        onRefresh={scanLibrary}
+                        isLoading={isLoading}
+                        selectedFolder={null}
+                        onSelectFolder={() => {}}
+                        isAndroid={false}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ALBUMS SUB-TAB */}
+              {activeTab === 'albums' && (
+                <div style={styles.categorizedListContainer} className="no-scrollbar">
+                  {!selectedAlbum ? (
+                    albumsList.map(([albumName, albumTracks]) => (
+                      <div 
+                        key={albumName}
+                        onClick={() => setSelectedAlbum(albumName)}
+                        style={styles.metroRowTile}
+                        className="metro-tile-tilt"
+                      >
+                        <Layers size={20} style={{ color: 'var(--accent)', marginRight: '16px' }} />
+                        <div style={styles.tileInfo}>
+                          <span style={styles.tileTitle}>{albumName}</span>
+                          <span style={styles.tileSubtitle}>{albumTracks.length} tracks</span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div>
+                      <div style={styles.subListHeader}>
+                        <button onClick={() => setSelectedAlbum(null)} style={styles.backButton}>&larr; BACK TO ALBUMS</button>
+                        <h3 style={styles.subCategoryTitle}>{selectedAlbum}</h3>
+                      </div>
+                      <TrackList 
+                        tracks={albumsList.find(a => a[0] === selectedAlbum)?.[1] || []}
+                        currentTrack={playbackState.currentTrack}
+                        isPlaying={playbackState.playing}
+                        onTrackSelect={handleTrackSelect}
+                        onRefresh={scanLibrary}
+                        isLoading={isLoading}
+                        selectedFolder={null}
+                        onSelectFolder={() => {}}
+                        isAndroid={false}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ACTIVE QUEUE SUB-TAB */}
+              {activeTab === 'queue' && (
+                <div style={styles.queueContainer}>
+                  <div style={styles.queueHeaderRow}>
+                    <span style={styles.queueHeaderLabel}>Active play list</span>
+                    <button 
+                      onClick={() => setPlayQueue([])} 
+                      style={styles.textClearButton}
+                      className="metro-tile-tilt"
+                    >
+                      CLEAR ALL
+                    </button>
+                  </div>
+                  <TrackList 
+                    tracks={playQueue}
+                    currentTrack={playbackState.currentTrack}
+                    isPlaying={playbackState.playing}
+                    onTrackSelect={handleTrackSelect}
+                    onRefresh={scanLibrary}
+                    isLoading={isLoading}
+                    selectedFolder={null}
+                    onSelectFolder={() => {}}
+                    isAndroid={false}
+                  />
                 </div>
               )}
             </div>
           </div>
+        )}
 
-          {/* Song Info */}
-          <div style={styles.songInfoBlock}>
-            <h2 style={styles.songTitleText}>{currentTitle}</h2>
-            <p style={styles.songArtistText}>{currentArtist}</p>
-          </div>
+        {/* --- PIVOT 2: NOW PLAYING --- */}
+        {activePivot === 'now-playing' && (
+          <div className="metro-page-active" style={styles.pageContainerNP}>
+            
+            {/* Left side - Cover Art, Visualizer and Metadata */}
+            <div style={styles.nowPlayingPanelLeft}>
+              <div style={styles.metroArtFrame}>
+                {currentCover ? (
+                  <img src={currentCover} alt="Album Art" style={styles.metroCoverArt} />
+                ) : (
+                  <div style={styles.metroCoverArtFallback}>
+                    <Music size={120} style={{ color: 'var(--text-muted)', opacity: 0.15 }} />
+                  </div>
+                )}
+              </div>
 
-          {/* Visualizer */}
-          <div style={styles.visualizerBlock}>
-            <Visualizer isPlaying={playbackState.playing} theme={theme} />
-          </div>
+              <div style={styles.metaBlock}>
+                <h1 style={styles.metroSongTitle}>{currentTitle}</h1>
+                <h3 style={styles.metroSongArtist}>{currentArtist}</h3>
+              </div>
 
-          {/* Progress Slider */}
-          <div style={styles.progressBlock}>
-            <input 
-              type="range" 
-              min={0}
-              max={playbackState.duration || 100}
-              value={playbackState.position}
-              onChange={handleSeek}
-              style={{ width: '100%' }}
-            />
-            <div style={styles.timeLabelContainer}>
-              <span>{formatTime(playbackState.position)}</span>
-              <span>{formatTime(playbackState.duration)}</span>
+              <div style={styles.npVisualizerContainer}>
+                <Visualizer isPlaying={playbackState.playing} theme={theme} />
+              </div>
+
+              {/* Seek Progress Bar */}
+              <div style={styles.progressContainer}>
+                <input 
+                  type="range" 
+                  min={0}
+                  max={playbackState.duration || 100}
+                  value={playbackState.position}
+                  onChange={handleSeek}
+                  style={styles.metroSlider}
+                />
+                <div style={styles.timeLabelContainer}>
+                  <span>{formatTime(playbackState.position)}</span>
+                  <span>{formatTime(playbackState.duration)}</span>
+                </div>
+              </div>
+
+              {/* Classic controls */}
+              <div style={styles.npControlRow}>
+                <button 
+                  onClick={() => setShuffle(!shuffle)}
+                  style={{
+                    ...styles.controlIconBtn,
+                    color: shuffle ? 'var(--accent)' : 'var(--text-muted)'
+                  }}
+                  className="metro-tile-tilt"
+                >
+                  <Shuffle size={20} />
+                </button>
+
+                <button onClick={handlePrevTrack} style={styles.controlIconBtn} className="metro-tile-tilt">
+                  <SkipBack size={26} fill="var(--text)" />
+                </button>
+
+                <button onClick={handlePlayPause} style={styles.metroBigPlayBtn} className="metro-tile-tilt">
+                  {playbackState.playing ? (
+                    <Pause size={28} fill="currentColor" />
+                  ) : (
+                    <Play size={28} fill="currentColor" style={{ marginLeft: '4px' }} />
+                  )}
+                </button>
+
+                <button onClick={() => handleNextTrack()} style={styles.controlIconBtn} className="metro-tile-tilt">
+                  <SkipForward size={26} fill="var(--text)" />
+                </button>
+
+                <button 
+                  onClick={() => {
+                    if (repeat === 'none') setRepeat('all');
+                    else if (repeat === 'all') setRepeat('one');
+                    else setRepeat('none');
+                  }}
+                  style={{
+                    ...styles.controlIconBtn,
+                    color: repeat !== 'none' ? 'var(--accent)' : 'var(--text-muted)'
+                  }}
+                  className="metro-tile-tilt"
+                >
+                  {repeat === 'one' ? (
+                    <div style={{ position: 'relative' }}>
+                      <Repeat size={20} />
+                      <span style={styles.repeatBadge}>1</span>
+                    </div>
+                  ) : (
+                    <Repeat size={20} />
+                  )}
+                </button>
+              </div>
+
+              {/* Volume Slider */}
+              <div style={styles.npVolumeRow}>
+                <button onClick={toggleMute} style={styles.volumeIconBtn}>
+                  {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                </button>
+                <input 
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={isMuted ? 0 : volume}
+                  onChange={handleVolumeChange}
+                  style={styles.volumeSlider}
+                />
+              </div>
             </div>
-          </div>
 
-          {/* Player controls */}
-          <div style={styles.controlRow}>
-            <button 
-              onClick={() => setShuffle(!shuffle)}
-              style={{
-                ...styles.controlIconBtn,
-                color: shuffle ? 'var(--accent)' : 'var(--text-muted)'
-              }}
-            >
-              <Shuffle size={18} />
-            </button>
+            {/* Right side - Dynamic Synced Lyrics Panel */}
+            <div style={styles.nowPlayingPanelRight}>
+              <div style={styles.lyricsHeader}>
+                <BookOpen size={16} style={{ color: 'var(--accent)', marginRight: '8px' }} />
+                <span>SYNCED LYRICS</span>
+              </div>
 
-            <button onClick={handlePrevTrack} style={styles.controlIconBtn}>
-              <SkipBack size={22} fill="var(--text)" />
-            </button>
-
-            <button onClick={handlePlayPause} style={styles.bigPlayBtn}>
-              {playbackState.playing ? (
-                <Pause size={24} fill="currentColor" />
-              ) : (
-                <Play size={24} fill="currentColor" style={{ marginLeft: '4px' }} />
-              )}
-            </button>
-
-            <button onClick={() => handleNextTrack()} style={styles.controlIconBtn}>
-              <SkipForward size={22} fill="var(--text)" />
-            </button>
-
-            <button 
-              onClick={() => {
-                if (repeat === 'none') setRepeat('all');
-                else if (repeat === 'all') setRepeat('one');
-                else setRepeat('none');
-              }}
-              style={{
-                ...styles.controlIconBtn,
-                color: repeat !== 'none' ? 'var(--accent)' : 'var(--text-muted)'
-              }}
-              title={`Repeat: ${repeat}`}
-            >
-              {repeat === 'one' ? (
-                <div style={{ position: 'relative' }}>
-                  <Repeat size={18} />
-                  <span style={styles.repeatBadge}>1</span>
+              {lyrics.length === 0 ? (
+                <div style={styles.lyricsEmptyState}>
+                  <p>No local synced lyrics found.</p>
+                  <p style={{ fontSize: '12px', marginTop: '8px', opacity: 0.6 }}>
+                    Place a matching ".lrc" file in the same folder as your audio track.
+                  </p>
                 </div>
               ) : (
-                <Repeat size={18} />
+                <div 
+                  ref={lyricsContainerRef} 
+                  style={styles.lyricsScroller}
+                  className="no-scrollbar"
+                >
+                  {lyrics.map((line, idx) => {
+                    const isActive = idx === currentLyricIndex;
+                    return (
+                      <div 
+                        key={idx}
+                        style={{
+                          ...styles.lyricsLine,
+                          color: isActive ? 'var(--accent)' : 'var(--text)',
+                          opacity: isActive ? 1 : 0.35,
+                          fontSize: isActive ? '20px' : '15px',
+                          fontWeight: isActive ? 'bold' : 'normal',
+                          transform: isActive ? 'scale(1.02)' : 'scale(1)',
+                        }}
+                      >
+                        {line.text}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
-            </button>
-          </div>
+            </div>
 
-          {/* Volume Control */}
-          <div style={styles.volumeBlock}>
-            <button onClick={toggleMute} style={styles.volumeIconBtn}>
-              {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
-            </button>
-            <input 
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={isMuted ? 0 : volume}
-              onChange={handleVolumeChange}
-              style={{ width: '100px' }}
-            />
           </div>
-        </div>
-      )}
+        )}
 
-      {/* MOBILE MINI PLAYER BAR */}
-      {isMobile && playbackState.currentTrack && (
+        {/* --- PIVOT 3: SETTINGS --- */}
+        {activePivot === 'settings' && (
+          <div className="metro-page-active" style={styles.pageContainer}>
+            
+            <div style={styles.settingsGrid} className="no-scrollbar">
+              <h3 style={styles.settingsSectionTitle}>THEME SELECTOR</h3>
+              <p style={styles.settingsSectionDesc}>
+                Customize the interface accent schemes. On Android, selecting Material theme pulls custom colors directly from your wallpaper dynamically.
+              </p>
+              
+              <div style={styles.themesGridWrapper}>
+                <ThemeSelector 
+                  currentTheme={theme} 
+                  onChangeTheme={applyTheme} 
+                  onClose={() => {}}
+                />
+              </div>
+
+              <div style={{ height: '32px' }} />
+
+              <h3 style={styles.settingsSectionTitle}>DEVELOPER DIAGNOSTICS</h3>
+              
+              <div style={styles.diagTile}>
+                <div style={styles.diagRow}>
+                  <span style={styles.diagLabel}>Platform Hook:</span>
+                  <span style={styles.diagVal}>{bridge.getPlatform().toUpperCase()}</span>
+                </div>
+                <div style={styles.diagRow}>
+                  <span style={styles.diagLabel}>Indexed Tracks:</span>
+                  <span style={styles.diagVal}>{tracks.length} songs</span>
+                </div>
+                <div style={styles.diagRow}>
+                  <span style={styles.diagLabel}>WebView Local CORS:</span>
+                  <span style={styles.diagVal} className="text-success">ALLOWED</span>
+                </div>
+                {selectedFolder && (
+                  <div style={styles.diagRow}>
+                    <span style={styles.diagLabel}>Active Library path:</span>
+                    <span style={styles.diagVal}>{selectedFolder}</span>
+                  </div>
+                )}
+                <div style={styles.diagRow}>
+                  <span style={styles.diagLabel}>Android API Insets:</span>
+                  <span style={styles.diagVal}>ACTIVE</span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        )}
+
+      </div>
+      
+      {/* 3. METRO BOTTOM QUICK STATE BAR */}
+      {playbackState.currentTrack && activePivot !== 'now-playing' && (
         <div 
-          onClick={() => setIsMobileNowPlayingOpen(true)}
-          style={styles.mobileMiniPlayer}
+          onClick={() => setActivePivot('now-playing')}
+          style={styles.bottomStateBar}
+          className="metro-tile-tilt"
         >
-          <img 
-            src={currentCover || 'https://picsum.photos/id/10/50/50'} 
-            alt="Art" 
-            style={styles.miniArt} 
-          />
-          <div style={styles.miniInfo}>
-            <span style={styles.miniTitle}>{playbackState.currentTrack.title}</span>
-            <span style={styles.miniArtist}>{playbackState.currentTrack.artist}</span>
+          <div style={styles.bottomMeta}>
+            <span style={styles.bottomSong}>{playbackState.currentTrack.title}</span>
+            <span style={styles.bottomArtist}>{playbackState.currentTrack.artist}</span>
           </div>
           <button 
             onClick={(e) => {
               e.stopPropagation();
               handlePlayPause();
             }}
-            style={styles.miniPlayBtn}
+            style={styles.bottomPlayBtn}
           >
-            {playbackState.playing ? <Pause size={18} /> : <Play size={18} style={{ marginLeft: '2px' }} />}
+            {playbackState.playing ? <Pause size={16} /> : <Play size={16} style={{ marginLeft: '2px' }} />}
           </button>
         </div>
       )}
 
-      {/* MOBILE FULL SCREEN NOW PLAYING SHEET */}
-      {isMobile && isMobileNowPlayingOpen && (
-        <div style={styles.mobileSheetContainer}>
-          <div style={styles.mobileSheetHeader}>
-            <button 
-              onClick={() => setIsMobileNowPlayingOpen(false)}
-              style={styles.sheetCloseBtn}
-            >
-              <ChevronDown size={28} />
-            </button>
-            <span style={styles.sheetHeaderTitle}>Now Playing</span>
-            <button 
-              onClick={() => {
-                setIsMobileNowPlayingOpen(false);
-                setShowThemeSelector(true);
-              }}
-              style={styles.sheetThemeBtn}
-            >
-              <Palette size={20} />
-            </button>
-          </div>
-
-          <div style={styles.mobileSheetBody}>
-            <div style={styles.mobileSheetArtContainer}>
-              {currentCover ? (
-                <img src={currentCover} alt="Cover" style={styles.mobileSheetArt} />
-              ) : (
-                <div style={styles.mobileSheetFallbackArt}>
-                  <Music size={90} style={{ color: 'var(--text-muted)', opacity: 0.3 }} />
-                </div>
-              )}
-            </div>
-
-            <div style={styles.mobileSheetInfo}>
-              <h2 style={styles.mobileSheetTitle}>{currentTitle}</h2>
-              <p style={styles.mobileSheetArtist}>{currentArtist}</p>
-            </div>
-
-            <div style={styles.mobileSheetVisualizer}>
-              <Visualizer isPlaying={playbackState.playing} theme={theme} />
-            </div>
-
-            <div style={styles.mobileSheetProgress}>
-              <input 
-                type="range" 
-                min={0}
-                max={playbackState.duration || 100}
-                value={playbackState.position}
-                onChange={handleSeek}
-                style={{ width: '100%' }}
-              />
-              <div style={styles.timeLabelContainer}>
-                <span>{formatTime(playbackState.position)}</span>
-                <span>{formatTime(playbackState.duration)}</span>
-              </div>
-            </div>
-
-            <div style={styles.mobileSheetControls}>
-              <button 
-                onClick={() => setShuffle(!shuffle)}
-                style={{
-                  ...styles.controlIconBtn,
-                  color: shuffle ? 'var(--accent)' : 'var(--text-muted)'
-                }}
-              >
-                <Shuffle size={20} />
-              </button>
-
-              <button onClick={handlePrevTrack} style={styles.controlIconBtn}>
-                <SkipBack size={26} fill="var(--text)" />
-              </button>
-
-              <button onClick={handlePlayPause} style={styles.mobileBigPlayBtn}>
-                {playbackState.playing ? (
-                  <Pause size={28} fill="currentColor" />
-                ) : (
-                  <Play size={28} fill="currentColor" style={{ marginLeft: '4px' }} />
-                )}
-              </button>
-
-              <button onClick={() => handleNextTrack()} style={styles.controlIconBtn}>
-                <SkipForward size={26} fill="var(--text)" />
-              </button>
-
-              <button 
-                onClick={() => {
-                  if (repeat === 'none') setRepeat('all');
-                  else if (repeat === 'all') setRepeat('one');
-                  else setRepeat('none');
-                }}
-                style={{
-                  ...styles.controlIconBtn,
-                  color: repeat !== 'none' ? 'var(--accent)' : 'var(--text-muted)'
-                }}
-              >
-                {repeat === 'one' ? (
-                  <div style={{ position: 'relative' }}>
-                    <Repeat size={20} />
-                    <span style={styles.repeatBadge}>1</span>
-                  </div>
-                ) : (
-                  <Repeat size={20} />
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {isMobile && showThemeSelector && (
-        <div 
-          style={styles.mobileThemeOverlay}
-          onClick={() => setShowThemeSelector(false)}
-        >
-          <div 
-            style={styles.mobileThemeSelectorDrawer}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <ThemeSelector 
-              currentTheme={theme} 
-              onChangeTheme={applyTheme} 
-              onClose={() => setShowThemeSelector(false)}
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-// Styling system
 const styles: { [key: string]: React.CSSProperties } = {
-  mainWindow: {
-    width: '960px',
-    maxWidth: '100%',
-    height: '620px',
+  hubContainer: {
+    width: '100%',
+    height: '100%',
     display: 'flex',
-    overflow: 'hidden',
+    flexDirection: 'column',
+    backgroundColor: '#000000', // pure Metro background
+    color: '#ffffff',
+    fontFamily: 'var(--font-family)',
     position: 'relative',
+    overflow: 'hidden',
   },
-  sidebar: {
-    width: '380px',
-    borderRight: '1px solid var(--border)',
+  hubHeader: {
+    padding: '24px 24px 10px 24px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    flexShrink: 0,
+  },
+  appTitle: {
+    fontSize: '11px',
+    fontWeight: 'bold',
+    letterSpacing: '3px',
+    opacity: 0.5,
+    textTransform: 'uppercase',
+  },
+  pivotMenu: {
+    display: 'flex',
+    gap: '24px',
+    alignItems: 'baseline',
+    marginTop: '6px',
+    overflowX: 'auto',
+  },
+  pivotItem: {
+    fontSize: '42px',
+    fontWeight: 300,
+    letterSpacing: '-1.5px',
+    cursor: 'pointer',
+    textTransform: 'lowercase',
+    margin: 0,
+    transition: 'color 0.25s, opacity 0.25s',
+  },
+  viewport: {
+    flex: 1,
+    width: '100%',
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  pageContainer: {
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '0 24px',
+  },
+  pageContainerNP: {
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    flexDirection: 'row',
+    padding: '0 24px 24px 24px',
+    gap: '32px',
+    overflow: 'hidden',
+  },
+  tabBar: {
+    display: 'flex',
+    gap: '18px',
+    borderBottom: '1px solid var(--border)',
+    paddingBottom: '8px',
+    marginBottom: '16px',
+    flexShrink: 0,
+    overflowX: 'auto',
+  },
+  tabItem: {
+    background: 'none',
+    border: 'none',
+    fontSize: '15px',
+    fontWeight: 600,
+    textTransform: 'lowercase',
+    cursor: 'pointer',
+    padding: '4px 0',
+  },
+  tabContent: {
+    flex: 1,
+    overflow: 'hidden',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  categorizedListContainer: {
+    flex: 1,
+    overflowY: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    paddingBottom: '24px',
+  },
+  metroRowTile: {
+    display: 'flex',
+    alignItems: 'center',
+    padding: '16px',
+    backgroundColor: '#111111',
+    border: '1px solid rgba(255, 255, 255, 0.05)',
+    borderRadius: '8px',
+    cursor: 'pointer',
+  },
+  tileInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  tileTitle: {
+    fontSize: '16px',
+    fontWeight: 600,
+    color: '#ffffff',
+  },
+  tileSubtitle: {
+    fontSize: '12px',
+    color: 'var(--text-muted)',
+    marginTop: '4px',
+  },
+  subListHeader: {
+    display: 'flex',
+    flexDirection: 'column',
+    marginBottom: '16px',
+    gap: '8px',
+  },
+  backButton: {
+    background: 'none',
+    border: 'none',
+    color: 'var(--accent)',
+    fontSize: '11px',
+    fontWeight: 'bold',
+    cursor: 'pointer',
+    textAlign: 'left',
+    letterSpacing: '1px',
+    padding: 0,
+  },
+  subCategoryTitle: {
+    fontSize: '24px',
+    fontWeight: 300,
+    color: '#ffffff',
+  },
+  queueContainer: {
     display: 'flex',
     flexDirection: 'column',
     height: '100%',
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    width: '100%',
   },
-  sidebarHeader: {
-    padding: '24px 20px 12px 20px',
+  queueHeaderRow: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: '12px',
+    flexShrink: 0,
   },
-  appName: {
-    display: 'flex',
-    alignItems: 'center',
+  queueHeaderLabel: {
+    fontSize: '13px',
+    color: 'var(--text-muted)',
+    textTransform: 'uppercase',
   },
-  logoText: {
-    fontSize: '22px',
-    fontWeight: 700,
-    color: 'var(--text)',
-    letterSpacing: '-0.5px',
-  },
-  actionIconButton: {
+  textClearButton: {
     background: 'none',
     border: 'none',
-    color: 'var(--text-muted)',
+    color: 'var(--accent)',
+    fontSize: '11px',
+    fontWeight: 'bold',
     cursor: 'pointer',
-    width: '36px',
-    height: '36px',
-    borderRadius: '50%',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    transition: 'background-color 0.2s ease',
+    letterSpacing: '1px',
   },
-  trackListContainer: {
-    flex: 1,
-    overflow: 'hidden',
-  },
-  playerContainer: {
+  
+  // NOW PLAYING PANEL SPLIT
+  nowPlayingPanelLeft: {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: '40px',
-    position: 'relative',
+    height: '100%',
+    padding: '12px 0',
   },
-  themeSelectorPopup: {
-    position: 'absolute',
-    top: '20px',
-    right: '20px',
-    zIndex: 10,
-    boxShadow: '0 10px 40px rgba(0,0,0,0.3)',
-  },
-  artSection: {
+  nowPlayingPanelRight: {
+    width: '320px',
     display: 'flex',
-    justifyContent: 'center',
-    marginBottom: '24px',
+    flexDirection: 'column',
+    height: '100%',
+    borderLeft: '1px solid var(--border)',
+    paddingLeft: '24px',
+    paddingTop: '20px',
+    paddingBottom: '20px',
   },
-  artCardShadow: {
-    width: '220px',
-    height: '220px',
-    borderRadius: '24px',
+  metroArtFrame: {
+    width: '180px',
+    height: '180px',
+    border: '1px solid rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#0d0d0d',
     overflow: 'hidden',
-    boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
-    border: '1px solid var(--glass-border)',
+    marginBottom: '16px',
   },
-  largeCoverArt: {
+  metroCoverArt: {
     width: '100%',
     height: '100%',
     objectFit: 'cover',
   },
-  largeFallbackCoverArt: {
+  metroCoverArtFallback: {
     width: '100%',
     height: '100%',
-    backgroundColor: 'var(--bg-panel)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  songInfoBlock: {
+  metaBlock: {
     textAlign: 'center',
-    marginBottom: '16px',
+    marginBottom: '12px',
     width: '100%',
-    padding: '0 20px',
   },
-  songTitleText: {
-    fontSize: '20px',
-    fontWeight: 600,
-    color: 'var(--text)',
+  metroSongTitle: {
+    fontSize: '22px',
+    fontWeight: 700,
+    color: '#ffffff',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+    padding: '0 8px',
   },
-  songArtistText: {
-    fontSize: '14px',
+  metroSongArtist: {
+    fontSize: '13px',
     color: 'var(--text-muted)',
-    marginTop: '6px',
+    marginTop: '4px',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
   },
-  visualizerBlock: {
+  npVisualizerContainer: {
+    width: '100%',
+    maxWidth: '240px',
+    height: '32px',
+    marginBottom: '16px',
+  },
+  progressContainer: {
     width: '100%',
     maxWidth: '300px',
     marginBottom: '16px',
   },
-  progressBlock: {
+  metroSlider: {
     width: '100%',
-    maxWidth: '350px',
-    marginBottom: '20px',
   },
-  timeLabelContainer: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    fontSize: '12px',
-    color: 'var(--text-muted)',
-    marginTop: '6px',
-  },
-  controlRow: {
+  npControlRow: {
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: '24px',
-    marginBottom: '24px',
+    gap: '20px',
+    marginBottom: '16px',
   },
   controlIconBtn: {
     background: 'none',
     border: 'none',
-    color: 'var(--text)',
+    color: '#ffffff',
     cursor: 'pointer',
     opacity: 0.8,
-    transition: 'opacity 0.2s, transform 0.1s',
   },
-  bigPlayBtn: {
-    width: '56px',
-    height: '56px',
+  metroBigPlayBtn: {
+    width: '60px',
+    height: '60px',
     borderRadius: '50%',
     backgroundColor: 'var(--accent)',
-    color: 'var(--bg)',
+    color: '#000000',
     border: 'none',
     cursor: 'pointer',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    transition: 'transform 0.1s ease, background-color 0.2s ease',
+    boxShadow: '0 4px 15px rgba(255, 255, 255, 0.05)',
   },
   repeatBadge: {
     position: 'absolute',
@@ -721,7 +1078,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '9px',
     fontWeight: 'bold',
     backgroundColor: 'var(--accent)',
-    color: 'var(--bg)',
+    color: '#000000',
     borderRadius: '50%',
     width: '12px',
     height: '12px',
@@ -729,10 +1086,12 @@ const styles: { [key: string]: React.CSSProperties } = {
     alignItems: 'center',
     justifyContent: 'center',
   },
-  volumeBlock: {
+  npVolumeRow: {
     display: 'flex',
     alignItems: 'center',
-    gap: '10px',
+    gap: '8px',
+    width: '100%',
+    maxWidth: '180px',
   },
   volumeIconBtn: {
     background: 'none',
@@ -740,206 +1099,141 @@ const styles: { [key: string]: React.CSSProperties } = {
     color: 'var(--text-muted)',
     cursor: 'pointer',
   },
+  volumeSlider: {
+    flex: 1,
+  },
 
-  // MOBILE STYLING
-  mobileListWrapper: {
+  // SYNCED LYRICS VIEW
+  lyricsHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    fontSize: '11px',
+    fontWeight: 'bold',
+    letterSpacing: '1px',
+    color: 'var(--text-muted)',
+    marginBottom: '16px',
+    flexShrink: 0,
+  },
+  lyricsEmptyState: {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
-    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: 'var(--text-muted)',
+    fontSize: '13px',
+    textAlign: 'center',
+    padding: '0 16px',
+  },
+  lyricsScroller: {
+    flex: 1,
+    overflowY: 'auto',
+    scrollBehavior: 'smooth',
+    paddingRight: '4px',
+    maskImage: 'linear-gradient(to bottom, transparent 0%, white 15%, white 85%, transparent 100%)',
+    WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, white 15%, white 85%, transparent 100%)',
+  },
+  lyricsLine: {
+    padding: '12px 0',
+    transition: 'color 0.3s, opacity 0.3s, font-size 0.3s, transform 0.3s',
+    lineHeight: '1.4',
+    textAlign: 'left',
+  },
+
+  // SETTINGS PANEL
+  settingsGrid: {
+    flex: 1,
+    overflowY: 'auto',
+    paddingBottom: '32px',
+  },
+  settingsSectionTitle: {
+    fontSize: '16px',
+    fontWeight: 'bold',
+    letterSpacing: '2px',
+    color: 'var(--accent)',
+    marginBottom: '8px',
+  },
+  settingsSectionDesc: {
+    fontSize: '13px',
+    color: 'var(--text-muted)',
+    lineHeight: '1.5',
+    marginBottom: '16px',
+  },
+  themesGridWrapper: {
     width: '100%',
   },
-  mobileMiniPlayer: {
+  diagTile: {
+    backgroundColor: '#0d0d0d',
+    border: '1px solid rgba(255, 255, 255, 0.05)',
+    borderRadius: '12px',
+    padding: '16px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+  },
+  diagRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    fontSize: '13px',
+    borderBottom: '1px solid rgba(255, 255, 255, 0.02)',
+    paddingBottom: '8px',
+  },
+  diagLabel: {
+    color: 'var(--text-muted)',
+  },
+  diagVal: {
+    fontFamily: 'monospace',
+    color: '#ffffff',
+  },
+
+  // BOTTOM STATE BAR
+  bottomStateBar: {
     position: 'absolute',
     bottom: '0',
     left: '0',
     right: '0',
-    height: '64px',
-    backgroundColor: 'var(--bg-panel)',
+    height: '56px',
+    backgroundColor: '#0a0a0a',
     borderTop: '1px solid var(--border)',
     display: 'flex',
     alignItems: 'center',
-    padding: '0 16px',
+    padding: '0 24px',
     cursor: 'pointer',
-    zIndex: 2,
+    zIndex: 5,
   },
-  miniArt: {
-    width: '40px',
-    height: '40px',
-    borderRadius: '8px',
-    objectFit: 'cover',
-    marginRight: '12px',
-  },
-  miniInfo: {
+  bottomMeta: {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
+    marginRight: '12px',
   },
-  miniTitle: {
-    fontSize: '14px',
-    fontWeight: 500,
+  bottomSong: {
+    fontSize: '13px',
+    fontWeight: 600,
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    color: 'var(--text)',
+    color: 'var(--accent)',
   },
-  miniArtist: {
-    fontSize: '12px',
+  bottomArtist: {
+    fontSize: '11px',
     color: 'var(--text-muted)',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+    marginTop: '2px',
   },
-  miniPlayBtn: {
+  bottomPlayBtn: {
     background: 'none',
     border: 'none',
     color: 'var(--accent)',
-    width: '36px',
-    height: '36px',
+    width: '32px',
+    height: '32px',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     cursor: 'pointer',
-  },
-
-  // Mobile now playing sheet
-  mobileSheetContainer: {
-    position: 'fixed',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'var(--bg)',
-    zIndex: 100,
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  mobileSheetHeader: {
-    height: '60px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '0 16px',
-    borderBottom: '1px solid var(--border)',
-  },
-  sheetCloseBtn: {
-    background: 'none',
-    border: 'none',
-    color: 'var(--text)',
-    cursor: 'pointer',
-  },
-  sheetHeaderTitle: {
-    fontSize: '16px',
-    fontWeight: 600,
-    color: 'var(--text)',
-  },
-  sheetThemeBtn: {
-    background: 'none',
-    border: 'none',
-    color: 'var(--text)',
-    cursor: 'pointer',
-  },
-  mobileSheetBody: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '24px',
-  },
-  mobileSheetArtContainer: {
-    width: '280px',
-    height: '280px',
-    borderRadius: '32px',
-    overflow: 'hidden',
-    boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
-    marginBottom: '32px',
-    border: '1px solid var(--glass-border)',
-  },
-  mobileSheetArt: {
-    width: '100%',
-    height: '100%',
-    objectFit: 'cover',
-  },
-  mobileSheetFallbackArt: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: 'var(--bg-panel)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  mobileSheetInfo: {
-    textAlign: 'center',
-    marginBottom: '20px',
-    width: '100%',
-  },
-  mobileSheetTitle: {
-    fontSize: '22px',
-    fontWeight: 700,
-    color: 'var(--text)',
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  mobileSheetArtist: {
-    fontSize: '15px',
-    color: 'var(--text-muted)',
-    marginTop: '6px',
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  mobileSheetVisualizer: {
-    width: '100%',
-    maxWidth: '280px',
-    marginBottom: '20px',
-  },
-  mobileSheetProgress: {
-    width: '100%',
-    marginBottom: '32px',
-  },
-  mobileSheetControls: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-    padding: '0 16px',
-  },
-  mobileBigPlayBtn: {
-    width: '68px',
-    height: '68px',
-    borderRadius: '50%',
-    backgroundColor: 'var(--accent)',
-    color: 'var(--bg)',
-    border: 'none',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    boxShadow: '0 8px 24px var(--accent)33',
-  },
-
-  // Mobile Theme Selector drawer
-  mobileThemeOverlay: {
-    position: 'fixed',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    zIndex: 200,
-    display: 'flex',
-    alignItems: 'flex-end',
-    justifyContent: 'center',
-  },
-  mobileThemeSelectorDrawer: {
-    width: '100%',
-    borderTopLeftRadius: '24px',
-    borderTopRightRadius: '24px',
-    overflow: 'hidden',
-    animation: 'slideUp 0.3s ease-out',
-    boxShadow: '0 -10px 40px rgba(0,0,0,0.4)',
   },
 };

@@ -18,6 +18,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -73,13 +75,94 @@ class MainActivity : ComponentActivity() {
                         webView.evaluateJavascript("javascript:if(window.onFolderSelected){window.onFolderSelected('$folderName');}", null)
                     }
                 }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: android.webkit.WebResourceRequest?,
+                    error: android.webkit.WebResourceError?
+                ) {
+                    super.onReceivedError(view, request, error)
+                    if (request?.isForMainFrame == true) {
+                        showErrorHtml(error?.description?.toString() ?: "Unknown WebView Error")
+                    }
+                }
             }
             addJavascriptInterface(WebAppInterface(this@MainActivity), "AndroidInterface")
         }
         setContentView(webView)
 
+        // Android 15/16 Window Insets safe area handler:
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
+            val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
+            val navigationBars = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
+            val density = resources.displayMetrics.density
+            val statusBarHeightDp = (statusBars.top / density).toInt()
+            val navBarHeightDp = (navigationBars.bottom / density).toInt()
+
+            val css = ":root { --status-bar-height: ${statusBarHeightDp}px; --navigation-bar-height: ${navBarHeightDp}px; }"
+            webView.post {
+                webView.evaluateJavascript(
+                    "javascript:(function(){" +
+                            "var id = 'musy-safe-area-styles';" +
+                            "var old = document.getElementById(id);" +
+                            "if(old) old.remove();" +
+                            "var style = document.createElement('style');" +
+                            "style.id = id;" +
+                            "style.innerHTML = \"$css\";" +
+                            "document.head.appendChild(style);" +
+                            "})()",
+                    null
+                )
+            }
+            insets
+        }
+
         checkAndRequestPermissions()
         startMediaController()
+    }
+
+    private fun showErrorHtml(errorDesc: String) {
+        val html = """
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body {
+                        background-color: #1a1b26;
+                        color: #c0caf5;
+                        font-family: sans-serif;
+                        display: flex;
+                        flex-direction: column;
+                        align-items: center;
+                        justify-content: center;
+                        height: 100vh;
+                        margin: 0;
+                        padding: 20px;
+                        box-sizing: border-box;
+                        text-align: center;
+                    }
+                    h1 { color: #f7768e; font-size: 24px; margin-bottom: 10px; }
+                    p { color: #9ece6a; font-size: 14px; margin-bottom: 20px; }
+                    button {
+                        background-color: #7aa2f7;
+                        color: #1a1b26;
+                        border: none;
+                        padding: 10px 20px;
+                        border-radius: 8px;
+                        font-weight: bold;
+                        cursor: pointer;
+                    }
+                </style>
+            </head>
+            <body>
+                <h1>Musy WebView Load Error</h1>
+                <p>Details: $errorDesc</p>
+                <button onclick="location.reload()">Reload Application</button>
+            </body>
+            </html>
+        """.trimIndent()
+        webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
     }
 
     override fun onStart() {

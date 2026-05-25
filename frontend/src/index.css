@@ -164,3 +164,44 @@ input[type="range"]::-moz-range-thumb:hover {
 .pulse-hover:hover {
   animation: pulse 2s infinite ease-in-out;
 }
+
+/* Safe area padding utilities for Android 15/16 */
+.safe-padding-top {
+  padding-top: var(--status-bar-height, 0px) !important;
+}
+.safe-padding-bottom {
+  padding-bottom: var(--navigation-bar-height, 0px) !important;
+}
+
+/* Metro UI transitions */
+@keyframes metroSlideIn {
+  0% {
+    transform: translateX(80px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.metro-page-active {
+  animation: metroSlideIn 0.4s cubic-bezier(0.1, 0.9, 0.2, 1) both;
+}
+
+/* Touch Tilt Effect (Windows Phone style) */
+.metro-tile-tilt {
+  transition: transform 0.15s cubic-bezier(0.1, 0.9, 0.2, 1);
+}
+.metro-tile-tilt:active {
+  transform: scale(0.97) translateY(1px);
+}
+
+/* Scrollbar hidden but functional if needed */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+

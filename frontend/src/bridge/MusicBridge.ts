@@ -306,6 +306,19 @@ class MusicBridge {
     }
     return null;
   }
+
+  public getLyrics(trackPath: string): string {
+    if (this.currentPlatform === 'android') {
+      try {
+        if ((window as any).AndroidInterface.loadLyrics) {
+          return (window as any).AndroidInterface.loadLyrics(trackPath);
+        }
+      } catch (e) {
+        console.error('Error fetching lyrics from Android interface:', e);
+      }
+    }
+    return '';
+  }
 }
 
 export const bridge = new MusicBridge();
